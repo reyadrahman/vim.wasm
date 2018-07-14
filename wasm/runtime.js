@@ -252,6 +252,25 @@ const VimWasmRuntime = {
                 this.elem.focus();
             };
 
+            VimInput.prototype.onVimInit = function() {
+                if (VimInput.prototype.sendKeyToVim === undefined) {
+                    // Setup C function here since when VW.init() is called, Module.cwrap is not set yet.
+                    //
+                    // XXX: Coverting 'boolean' to 'number' does not work if Emterpreter is enabled.
+                    // So converting to 'number' from 'boolean' is done in JavaScript.
+                    VimInput.prototype.sendKeyToVim = Module.cwrap('gui_wasm_send_key', null, [
+                        'number', // key code1
+                        'number', // key code2 (used for special otherwise 0)
+                        'number', // TRUE iff Ctrl key is pressed
+                        'number', // TRUE iff Shift key is pressed
+                        'number', // TRUE iff Alt key is pressed
+                        'number', // TRUE iff Meta key is pressed
+                    ]);
+                    // XXX: Even if {async: true} is set for ccall(), passing strings as char * to C function
+                    // does not work with Emterpreter
+                }
+            };
+
             // Origin is at left-above.
             //
             //      O-------------> x
@@ -261,6 +280,164 @@ const VimWasmRuntime = {
             //      |
             //      V
             //      y
+
+            function CanvasRendererNew() {
+                this.canvas = document.getElementById('vim-screen');
+                this.ctx = this.canvas.getContext('2d', { alpha: false });
+                this.adjustScreenSize();
+                this.canvas.addEventListener('click', this.onClick.bind(this));
+                this.input = new VimInput();
+                // TODO: Add resize event listener
+            }
+
+            CanvasRendererNew.prototype.onVimInit = function() {
+                this.input.onVimInit();
+            };
+
+            CanvasRendererNew.prototype.onVimExit = function() {};
+
+            CanvasRendererNew.prototype.onClick = function(event) {
+                this.input.focus();
+            };
+
+            CanvasRendererNew.prototype.adjustScreenSize = function() {
+                const rect = this.canvas.getBoundingClientRect();
+                this.elemHeight = rect.height;
+                this.elemWidth = rect.width;
+                // May need to notify the DOM element width/height to C
+                const dpr = window.devicePixelRatio || 1;
+                this.canvas.width = rect.width * dpr;
+                this.canvas.height = rect.height * dpr;
+            };
+
+            CanvasRendererNew.prototype.setColorFG = function(name) {
+                this.fgColor = name;
+            };
+
+            CanvasRendererNew.prototype.setColorBG = function(name) {
+                this.bgColor = name;
+            };
+
+            CanvasRendererNew.prototype.setColorSP = function(name) {
+                this.spColor = name;
+            };
+
+            CanvasRendererNew.prototype.setFont = function(name, size) {
+                this.fontName = name;
+                this.input.setFont(name, size);
+            };
+
+            CanvasRendererNew.prototype.drawRect = function(x, y, w, h, color, filled) {
+                const dpr = window.devicePixelRatio || 1;
+                x = Math.floor(x * dpr);
+                y = Math.floor(y * dpr);
+                w = Math.floor(w * dpr);
+                h = Math.floor(h * dpr);
+                this.ctx.fillStyle = color;
+                if (filled) {
+                    this.ctx.fillRect(x, y, w, h);
+                } else {
+                    this.ctx.rect(x, y, w, h);
+                }
+            };
+
+            CanvasRendererNew.prototype.drawText = function(
+                text,
+                ch,
+                lh,
+                cw,
+                x,
+                y,
+                bold,
+                underline,
+                undercurl,
+                strike
+            ) {
+                const dpr = window.devicePixelRatio || 1;
+                ch = ch * dpr;
+                lh = lh * dpr;
+                cw = cw * dpr;
+                x = x * dpr;
+                y = y * dpr;
+
+                var font = Math.floor(ch) + 'px ' + this.fontName;
+                if (bold) {
+                    font = 'bold ' + font;
+                }
+
+                this.ctx.font = font;
+                this.ctx.textBaseline = 'top'; // FIXME: Should set 'bottom' from descent of the font
+                this.ctx.fillStyle = this.fgColor;
+
+                const yi = Math.floor(y);
+                for (var i = 0; i < text.length; ++i) {
+                    this.ctx.fillText(text[i], Math.floor(x + cw * i), yi);
+                }
+
+                if (underline) {
+                    this.ctx.strokeStyle = this.fgColor;
+                    this.ctx.lineWidth = 1 * dpr;
+                    this.ctx.setLineDash([]);
+                    this.ctx.beginPath();
+                    // Note: 3 is set with considering the width of line.
+                    // TODO: Calcurate the position of the underline with descent.
+                    const underlineY = Math.floor(y + lh - 3 * res);
+                    this.ctx.moveTo(Math.floor(x), underlineY);
+                    this.ctx.lineTo(Math.floor(x + cw * text.length), underlineY);
+                    this.ctx.stroke();
+                } else if (undercurl) {
+                    this.ctx.strokeStyle = this.spColor;
+                    this.ctx.lineWidth = 1 * dpr;
+                    const curlWidth = Math.floor(cw / 3);
+                    this.ctx.setLineDash([curlWidth, curlWidth]);
+                    this.ctx.beginPath();
+                    // Note: 3 is set with considering the width of line.
+                    // TODO: Calcurate the position of the underline with descent.
+                    const undercurlY = Math.floor(y + lh - 3 * dpr);
+                    this.ctx.moveTo(Math.floor(x), undercurlY);
+                    this.ctx.lineTo(Math.floor(x + cw * text.length), undercurlY);
+                    this.ctx.stroke();
+                } else if (strike) {
+                    this.ctx.strokeStyle = this.fgColor;
+                    this.ctx.lineWidth = 1 * dpr;
+                    this.ctx.beginPath();
+                    const strikeY = Math.floor(y + lh / 2);
+                    this.ctx.moveTo(Math.floor(x), strikeY);
+                    this.ctx.lineTo(Math.floor(x + cw * text.length), strikeY);
+                    this.ctx.stroke();
+                }
+            };
+
+            CanvasRendererNew.prototype.invertRect = function(x, y, w, h) {
+                const dpr = window.devicePixelRatio || 1;
+                x = Math.floor(x * dpr);
+                y = Math.floor(y * dpr);
+                w = Math.floor(w * dpr);
+                h = Math.floor(h * dpr);
+
+                const img = this.ctx.getImageData(x, y, w, h);
+                const data = img.data;
+                const len = data.length;
+                for (var i = 0; i < len; ++i) {
+                    data[i] = 255 - data[i];
+                    ++i;
+                    data[i] = 255 - data[i];
+                    ++i;
+                    data[i] = 255 - data[i];
+                    ++i; // Skip alpha
+                }
+                this.ctx.putImageData(img, x, y);
+            };
+
+            CanvasRendererNew.prototype.imageScroll = function(x, sy, dy, w, h) {
+                const dpr = window.devicePixelRatio || 1;
+                x = Math.floor(x * dpr);
+                sy = Math.floor(sy * dpr);
+                dy = Math.floor(dy * dpr);
+                w = Math.floor(w * dpr);
+                h = Math.floor(h * dpr);
+                this.ctx.drawImage(this.canvas, x, sy, w, h, x, dy, w, h);
+            };
 
             // Editor screen renderer
             function CanvasRenderer() {
@@ -401,7 +578,7 @@ const VimWasmRuntime = {
                     data[i] = 255 - data[i];
                     ++i; // Skip alpha
                 }
-                ctx.putImageData(img, x, y);
+                this.ctx.putImageData(img, x, y);
             };
 
             CanvasRenderer.prototype.drawPartCursor = function(row, col, wpix, hpix) {
@@ -574,9 +751,8 @@ const VimWasmRuntime = {
             };
 
             VW.VimInput = VimInput;
-            VW.CanvasRenderer = CanvasRenderer;
-            VW.renderer = new CanvasRenderer();
             VW.rgbToColorCode = rgbToColorCode;
+            VW.renderer2 = new CanvasRendererNew();
         },
     },
 
@@ -601,12 +777,13 @@ const VimWasmRuntime = {
     // void vimwasm_will_init(void);
     vimwasm_will_init: function() {
         debug('will_init:');
-        VW.renderer.onVimInit();
+        VW.renderer2.onVimInit();
     },
 
     // void vimwasm_will_exit(int);
     vimwasm_will_exit: function(exit_status) {
         debug('will_exit:', exit_status);
+        VW.renderer2.onVimExit();
     },
 
     // int vimwasm_get_char_width(void);
@@ -636,7 +813,7 @@ const VimWasmRuntime = {
     // int vimwasm_get_win_height(void);
     vimwasm_get_win_height: function() {
         debug('get_win_height:');
-        return VW.renderer.rows * VW.renderer.lineHeight;
+        return VW.renderer.rows * VW.renderer.charHeight;
     },
 
     // int vimwasm_resize(int, int, int, int, int, int, int);
@@ -648,7 +825,7 @@ const VimWasmRuntime = {
     vimwasm_set_font: function(font_name) {
         font_name = Pointer_stringify(font_name);
         debug('set_font:', font_name);
-        VW.renderer.setFont(font_name);
+        VW.renderer2.setFont(font_name);
     },
 
     // int vimwasm_is_font(char *);
@@ -774,6 +951,95 @@ const VimWasmRuntime = {
         title = Pointer_stringify(title);
         debug('set_title:', title);
         document.title = title;
+    },
+
+    // void vimwasm_set_fg_color2(char *);
+    vimwasm_set_fg_color2: function(name) {
+        name = Pointer_stringify(name);
+        debug('set_fg_color2:', name);
+        VW.renderer2.setColorFG(name);
+    },
+
+    // void vimwasm_set_bg_color2(char *);
+    vimwasm_set_bg_color2: function(name) {
+        name = Pointer_stringify(name);
+        debug('set_bg_color2:', name);
+        VW.renderer2.setColorBG(name);
+    },
+
+    // void vimwasm_set_sp_color2(char *);
+    vimwasm_set_sp_color2: function(name) {
+        name = Pointer_stringify(name);
+        debug('set_sp_color2:', name);
+        VW.renderer2.setColorSP(name);
+    },
+
+    // int vimwasm_get_dom_width()
+    vimwasm_get_dom_width: function() {
+        debug('get_dom_width:');
+        return VW.renderer2.elemWidth;
+    },
+
+    // int vimwasm_get_dom_height()
+    vimwasm_get_dom_height: function() {
+        debug('get_dom_height:');
+        return VW.renderer2.elemHeight;
+    },
+
+    // void vimwasm_draw_rect(int, int, int, int, char *, int);
+    vimwasm_draw_rect: function(x, y, w, h, color, filled) {
+        color = Pointer_stringify(color);
+        debug('draw_rect', x, y, w, h, color, !!filled);
+        VW.renderer2.drawRect(x, y, w, h, color, !!filled);
+    },
+
+    // void vimwasm_draw_text(int, int, int, int, int, char *, int, int, int, int, int);
+    vimwasm_draw_text: function(charHeight, lineHeight, charWidth, x, y, str, len, bold, underline, undercurl, strike) {
+        const text = Pointer_stringify(str, len);
+        debug(
+            'draw_text:',
+            "'" + text + "'",
+            charHeight,
+            lineHeight,
+            charWidth,
+            x,
+            y,
+            !!bold,
+            !!underline,
+            !!undercurl,
+            !!strike
+        );
+        VW.renderer2.drawText(
+            text,
+            charHeight,
+            lineHeight,
+            charWidth,
+            x,
+            y,
+            !!bold,
+            !!underline,
+            !!undercurl,
+            !!strike
+        );
+    },
+
+    // void vimwasm_set_font(char *, int);
+    vimwasm_set_font2: function(font_name, font_size) {
+        font_name = Pointer_stringify(font_name);
+        debug('set_font2:', font_name, font_size);
+        VW.renderer2.setFont(font_name, font_size);
+    },
+
+    // void vimwasm_invert_rect2(int, int, int, int);
+    vimwasm_invert_rect2: function(x, y, w, h) {
+        debug('invert_rect2:', x, y, w, h);
+        VW.renderer2.invertRect(x, y, w, h);
+    },
+
+    // void vimwasm_image_scroll(int, int, int, int, int);
+    vimwasm_image_scroll: function(x, sy, dy, w, h) {
+        debug('image_scroll:', x, sy, dy, w, h);
+        VW.renderer2.imageScroll(x, sy, dy, w, h);
     },
 };
 
